@@ -36,27 +36,30 @@ public class JsonlStreamer implements WebFluxConfigurer {
     RouterFunction<?> router() {
         LOGGER.info("streaming files from basePath={}", basePath);
         return RouterFunctions.route()
-                .GET("/{contentType:sse|ndjson}/{file}", this::openStream)
+                .GET("/ndjson/{file}", request -> openStream(request, MediaType.APPLICATION_NDJSON))
+                .GET("/sse/{file}", request -> openStream(request, MediaType.TEXT_EVENT_STREAM))
                 .build();
     }
 
-    Mono<ServerResponse> openStream(ServerRequest request) {
-        String contentType = request.pathVariable("contentType");
+    Mono<ServerResponse> openStream(ServerRequest request, MediaType mediaType) {
         String file = request.pathVariable("file");
         long offset = request.queryParam("offset").map(Long::parseLong).filter(l -> l > 0).orElse(0L);
         int rate = request.queryParam("rate").map(Integer::parseInt).filter(i -> i > 0).orElse(1);
-        LOGGER.info("open {} stream for file={} at offset={} and rate={}", contentType, file, offset, rate);
+        LOGGER.info("open {} stream for file={} at offset={} and rate={}", mediaType, file, offset, rate);
 
         try {
             var fis = new FileInputStream(basePath + "/" + file + ".jsonl");
             var bis = new BufferedInputStream(fis, 16 * 1024);
             bis.skipNBytes(offset);
-            var publisher = createFlux(bis, offset).delayElements(Duration.ofMillis(1000 / rate));
+            var publisher = createFlux(bis, offset)
+                    .map(str -> mediaType == MediaType.APPLICATION_NDJSON ? str + "\n" : str)
+                    .delayElements(Duration.ofMillis(1000 / rate));
 
             return ServerResponse
                     .ok()
-                    .contentType("ndjson".equals(contentType) ? MediaType.APPLICATION_NDJSON : MediaType.TEXT_EVENT_STREAM)
+                    .contentType(mediaType)
                     .body(publisher, String.class);
+
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
@@ -68,9 +71,9 @@ public class JsonlStreamer implements WebFluxConfigurer {
                 (is, sink) -> {
                     try {
                         var baos = new ByteArrayOutputStream(16 * 1024);
-                        int result;
-                        for (result = is.read(); result != -1 && result != 0x0a; result = is.read()) {
-                            baos.write((byte) result);
+                        int nextByte;
+                        for (nextByte = is.read(); nextByte != -1 && nextByte != 0x0a; nextByte = is.read()) {
+                            baos.write((byte) nextByte);
                         }
 
                         if (baos.size() > 0) {
@@ -81,7 +84,7 @@ public class JsonlStreamer implements WebFluxConfigurer {
                             position.addAndGet(baos.size() + 1); // +1 is for 0x0a
                         }
 
-                        if (result == -1) {
+                        if (nextByte == -1) {
                             sink.complete();
                         }
                     } catch (IOException e) {
